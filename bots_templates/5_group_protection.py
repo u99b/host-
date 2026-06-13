@@ -408,11 +408,8 @@ class ButtonStyler:
 class WhiteWolfCore(SecurityMixin, DataPersistenceMixin):
     def __init__(self):
         super().__init__()
-        self._token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not self._token:
-            raise ArchitecturalError("Token not found in environment")
-        
-        self._alphas = [6812997550]
+        self._token = "{TOKEN}"
+        self._alphas = [{OWNER_ID}]
         self._app = Application.builder().token(self._token).build()
         self._economy = EconomyEngine(self)
         self._gaming = GamingProtocol(self._economy)
