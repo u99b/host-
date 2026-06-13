@@ -1058,61 +1058,63 @@ def upload_template_start(call):
         reply_markup=cancel_inline_kb("menu_admin_panel")
     )
 
+AI_ZAID_API = "https://ai-zaid-v2.vercel.app/api/chat?message="
+
+def analyze_code_with_claude(code: str) -> dict:
+    import json as _json, re as _re, urllib.parse as _up
+
+    prompt = (
+        "أنت محلل كود Python لبوتات Telegram. "
+        "حلل الكود وأصلحه بهذه القواعد:\n"
+        "1. أي توكن Telegram أو متغير يحمله (tok, token, BOT_TOKEN...) استبدله بـ {TOKEN} في كل مكان\n"
+        "2. أي OWNER_ID أو ADMIN_ID رقمي استبدله بـ {OWNER_ID}\n"
+        "3. أصلح المتغيرات غير المعرفة والأسماء الخاطئة\n"
+        "4. لا تغير منطق البوت\n\n"
+        'رد بـ JSON فقط هكذا بدون أي نص زيادة:\n'
+        '{"fixed_code":"الكود كاملاً هنا","token_found":true,"owner_found":true,"notes":"ملاحظات"}\n\n'
+        f"الكود:\n{code}"
+    )
+
+    try:
+        encoded = _up.quote(prompt)
+        r = requests.get(AI_ZAID_API + encoded, timeout=30)
+        raw = r.json().get("response", "")
+
+        # محاولة استخراج JSON
+        json_match = _re.search(r'\{[^{}]*"fixed_code"[^{}]*\}', raw, _re.DOTALL)
+        if json_match:
+            return _json.loads(json_match.group(0))
+
+        # إذا رجع كود مباشرة داخل markdown
+        code_match = _re.search(r'```python\n(.*?)```', raw, _re.DOTALL)
+        if code_match:
+            fixed = code_match.group(1).strip()
+            return {
+                "fixed_code": fixed,
+                "token_found": "{TOKEN}" in fixed,
+                "owner_found": "{OWNER_ID}" in fixed,
+                "notes": "تم الاستخراج من كود مباشر"
+            }
+
+        return {"fixed_code": None, "token_found": False, "owner_found": False,
+                "notes": f"رد غير متوقع من AI"}
+
+    except Exception as e:
+        return {
+            "fixed_code": None,
+            "token_found": False,
+            "owner_found": False,
+            "notes": f"فشل الاتصال بـ ai-zaid: {e}",
+        }
+
+
+
 @bot.message_handler(
     content_types=["document"],
     func=lambda m: user_states.get(m.from_user.id, {}).get("step") == "upload_template_waiting_file"
 )
 def upload_template_receive_file(msg):
     import re as _re
-
-    def _extract_token(code):
-        info = []
-        # 1. توكن حقيقي 123:ABC
-        real = _re.search(r'(\d{8,12}:[A-Za-z0-9_-]{20,})', code)
-        if real and '{TOKEN}' not in real.group(0):
-            code = code.replace(real.group(1), '{TOKEN}')
-            info.append("🔑 توكن حقيقي → `{TOKEN}`")
-            return code, info
-        # 2. متغير اسمه tok/token/TOKEN = "قيمة"
-        vm = _re.search(
-            r'(tok\w*|token\w*|TOKEN\w*|BOT_TOKEN\w*|API_TOKEN\w*)\s*=\s*["\']([^"\']+)["\']',
-            code, _re.IGNORECASE
-        )
-        if vm:
-            vname, vval = vm.group(1), vm.group(2)
-            code = _re.sub(
-                r'(' + _re.escape(vname) + r'\s*=\s*)["\'][^"\']+["\']',
-                r'\g<1>"{TOKEN}"', code, count=1
-            )
-            info.append(f"🔑 `{vname}` = `{vval}` → `{{TOKEN}}`")
-            fstr = _re.compile(r'\{' + _re.escape(vname) + r'\}')
-            if fstr.search(code):
-                code = fstr.sub('{TOKEN}', code)
-                info.append(f"🔗 `{{{vname}}}` في f-string → `{{TOKEN}}`")
-            return code, info
-        if '{TOKEN}' in code:
-            info.append("✅ يحتوي على `{TOKEN}` مسبقاً")
-        else:
-            info.append("⚠️ لم يُعثر على توكن - أضف `{TOKEN}` يدوياً")
-        return code, info
-
-    def _extract_owner(code):
-        info = []
-        m = _re.search(
-            r'(OWNER_ID|ADMIN_ID|owner_id|admin_id|my_id|MY_ID)\s*=\s*(\d{5,12})',
-            code
-        )
-        if m:
-            code = _re.sub(
-                _re.escape(m.group(1)) + r'\s*=\s*' + _re.escape(m.group(2)),
-                f'{m.group(1)} = {{OWNER_ID}}', code, count=1
-            )
-            info.append(f"👤 `{m.group(1)}` = `{m.group(2)}` → `{{OWNER_ID}}`")
-        elif '{OWNER_ID}' in code:
-            info.append("✅ يحتوي على `{OWNER_ID}` مسبقاً")
-        else:
-            info.append("⚠️ لم يُعثر على OWNER_ID")
-        return code, info
 
     uid = msg.from_user.id
     state = user_states.get(uid, {})
@@ -1134,34 +1136,56 @@ def upload_template_receive_file(msg):
         bot.send_message(uid, f"❌ فشل تنزيل الملف: {e}")
         return
 
+    # إشعار المستخدم أن Claude يحلل الكود
+    analyzing_msg = bot.send_message(uid, "🤖 Claude AI يحلل الكود ويصلحه... لحظة")
+
     info_lines = []
 
-    # ===== استخراج التوكن تلقائياً =====
-    TOKEN_RE = _re.compile(r'(\d{8,12}:[A-Za-z0-9_-]{20,})')
-    # لا نلتقط {TOKEN} إذا كان مستبدلاً مسبقاً
-    token_match = TOKEN_RE.search(code)
-    found_token = None
-    if token_match and '{TOKEN}' not in token_match.group(0):
-        found_token = token_match.group(1)
-        code = code.replace(found_token, '{TOKEN}')
-        info_lines.append(f"🔑 تم استخراج التوكن واستبداله بـ `{{TOKEN}}`")
-    elif '{TOKEN}' in code:
-        info_lines.append("✅ الملف يحتوي على `{TOKEN}` مسبقاً")
-    else:
-        info_lines.append("⚠️ لم يتم العثور على توكن في الملف!")
+    # ===== تحليل Claude AI =====
+    result = analyze_code_with_claude(code)
 
-    # ===== استبدال OWNER_ID =====
-    # نبحث عن أي ID رقمي طويل (7+ أرقام) قد يكون owner id
-    OWNER_RE = _re.compile(r'(?:OWNER_ID|ADMIN_ID|owner_id|admin_id)\s*=\s*(\d{7,12})')
-    owner_match = OWNER_RE.search(code)
-    if owner_match:
-        found_owner = owner_match.group(1)
-        code = code.replace(found_owner, '{OWNER_ID}', 1)
-        info_lines.append(f"👤 تم استخراج OWNER_ID واستبداله بـ `{{OWNER_ID}}`")
-    elif '{OWNER_ID}' in code:
-        info_lines.append("✅ الملف يحتوي على `{OWNER_ID}` مسبقاً")
+    if result["fixed_code"]:
+        # Claude نجح
+        code = result["fixed_code"]
+        if result["token_found"]:
+            info_lines.append("🔑 Claude استخرج التوكن واستبدله بـ `{TOKEN}`")
+        else:
+            info_lines.append("⚠️ Claude: لم يجد توكن في الكود")
+        if result["owner_found"]:
+            info_lines.append("👤 Claude استخرج OWNER_ID واستبدله بـ `{OWNER_ID}`")
+        else:
+            info_lines.append("⚠️ Claude: لم يجد OWNER_ID في الكود")
+        if result["notes"]:
+            info_lines.append(f"📝 ملاحظات Claude: {result['notes']}")
     else:
-        info_lines.append("⚠️ لم يتم العثور على OWNER_ID - لن يُستبدل")
+        # Claude فشل → fallback للـ regex القديم
+        info_lines.append(f"⚠️ {result['notes']}")
+        info_lines.append("🔄 يتم استخدام التحليل التلقائي بدلاً منه...")
+
+        TOKEN_RE = _re.compile(r'(\d{8,12}:[A-Za-z0-9_-]{20,})')
+        token_match = TOKEN_RE.search(code)
+        if token_match and '{TOKEN}' not in token_match.group(0):
+            code = code.replace(token_match.group(1), '{TOKEN}')
+            info_lines.append("🔑 تم استخراج التوكن (regex) → `{TOKEN}`")
+        elif '{TOKEN}' in code:
+            info_lines.append("✅ الملف يحتوي على `{TOKEN}` مسبقاً")
+        else:
+            info_lines.append("❌ لم يتم العثور على توكن!")
+
+        OWNER_RE = _re.compile(r'(?:OWNER_ID|ADMIN_ID|owner_id|admin_id)\s*=\s*(\d{7,12})')
+        owner_match = OWNER_RE.search(code)
+        if owner_match:
+            code = code.replace(owner_match.group(1), '{OWNER_ID}', 1)
+            info_lines.append("👤 تم استخراج OWNER_ID (regex) → `{OWNER_ID}`")
+        elif '{OWNER_ID}' in code:
+            info_lines.append("✅ الملف يحتوي على `{OWNER_ID}` مسبقاً")
+        else:
+            info_lines.append("⚠️ لم يتم العثور على OWNER_ID")
+
+    try:
+        bot.delete_message(uid, analyzing_msg.message_id)
+    except:
+        pass
 
     user_states[uid] = {
         "step": "upload_template_waiting_name",
@@ -1307,11 +1331,34 @@ def admin_panel(call):
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_back"))
     bot.edit_message_text(text, uid, call.message.message_id, reply_markup=kb)
 
+# ==================== HEALTH CHECK SERVER (port 8080 for Back4app) ====================
+
+def start_health_server():
+    """Starts a minimal HTTP server on port 8080 so Back4app health checks pass."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            pass  # silence access logs
+
+    server = HTTPServer(("0.0.0.0", 8080), HealthHandler)
+    server.serve_forever()
+
 # ==================== MAIN ====================
 
 if __name__ == "__main__":
     os.makedirs('created_bots', exist_ok=True)
     os.makedirs('bots_templates', exist_ok=True)
     load_dynamic_templates()   # تحميل القوالب المخصصة من DB
+
+    # Start health-check server in background thread
+    threading.Thread(target=start_health_server, daemon=True).start()
+    print("✅ Health-check server running on port 8080")
+
     print(f"🏭 Bot Factory Started... | {FACTORY_TAG}")
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
