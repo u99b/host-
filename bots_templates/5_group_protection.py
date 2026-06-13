@@ -19,8 +19,7 @@ import aiofiles
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, 
-    User, Chat, Message, CallbackQuery, ChatPermissions,
-    KeyboardButtonStyle
+    User, Chat, Message, CallbackQuery, ChatPermissions
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
@@ -380,30 +379,23 @@ class AuthorizationDecorator:
         return wrapper
 
 class ButtonStyler:
-    DANGER = KeyboardButtonStyle.DANGER
-    SUCCESS = KeyboardButtonStyle.SUCCESS
-    PRIMARY = KeyboardButtonStyle.PRIMARY
-    
+    """Simple button factory — no KeyboardButtonStyle needed (standard python-telegram-bot)."""
+
     @staticmethod
-    def forge(text: str, callback: str, style: Optional[KeyboardButtonStyle] = None, emoji_icon: Optional[str] = None) -> InlineKeyboardButton:
-        btn = InlineKeyboardButton(text, callback_data=callback)
-        if style:
-            btn.style = style
-        if emoji_icon:
-            btn.icon_custom_emoji_id = emoji_icon
-        return btn
-    
+    def forge(text: str, callback: str, style=None, emoji_icon=None) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text, callback_data=callback)
+
     @staticmethod
     def forge_danger(text: str, callback: str) -> InlineKeyboardButton:
-        return ButtonStyler.forge(text, callback, ButtonStyler.DANGER)
-    
+        return InlineKeyboardButton(text, callback_data=callback)
+
     @staticmethod
     def forge_success(text: str, callback: str) -> InlineKeyboardButton:
-        return ButtonStyler.forge(text, callback, ButtonStyler.SUCCESS)
-    
+        return InlineKeyboardButton(text, callback_data=callback)
+
     @staticmethod
     def forge_primary(text: str, callback: str) -> InlineKeyboardButton:
-        return ButtonStyler.forge(text, callback, ButtonStyler.PRIMARY)
+        return InlineKeyboardButton(text, callback_data=callback)
 
 class WhiteWolfCore(SecurityMixin, DataPersistenceMixin):
     def __init__(self):
