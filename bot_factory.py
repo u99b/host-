@@ -24,6 +24,8 @@ bot_templates = {
     '5': 'bots_templates/5_group_protection.py',
     '6': 'bots_templates/6_vip_store.py',
     '7': 'bots_templates/7_contact.py',
+    '8': 'bots_templates/8_claude_ai.py',
+    '9': 'bots_templates/9_blood_text.py',
 }
 
 bot_type_names = {
@@ -34,6 +36,8 @@ bot_type_names = {
     '5': '🛡 بوت حماية مجموعات',
     '6': '🛒 بوت متجر VIP',
     '7': '📞 بوت تواصل',
+    '8': '🤖 بوت Claude AI',
+    '9': '🩸 بوت كتابة الدم',
 }
 
 os.makedirs('bots_templates', exist_ok=True)
@@ -83,6 +87,17 @@ def init_db():
                 user_id INTEGER UNIQUE,
                 username TEXT,
                 first_name TEXT,
+                added_at TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS custom_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE,
+                name TEXT,
+                filename TEXT,
+                requirements TEXT,
+                added_by INTEGER,
                 added_at TEXT
             )
         """)
@@ -167,6 +182,28 @@ def mandatory_keyboard():
     kb.add(types.InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_sub"))
     return kb
 
+def load_dynamic_templates():
+    """تحميل القوالب المضافة من قاعدة البيانات"""
+    c = conn.cursor()
+    c.execute("SELECT key, name, filename FROM custom_templates")
+    rows = c.fetchall()
+    for key, name, filename in rows:
+        bot_templates[key] = f"bots_templates/{filename}"
+        bot_type_names[key] = name
+
+def get_next_template_key():
+    """الحصول على مفتاح القالب التالي"""
+    existing = set(bot_templates.keys())
+    i = 10  # نبدأ من 10 للقوالب المخصصة
+    while str(i) in existing:
+        i += 1
+    return str(i)
+
+def get_custom_templates():
+    c = conn.cursor()
+    c.execute("SELECT * FROM custom_templates ORDER BY id")
+    return c.fetchall()
+
 # ==================== BOT CREATION ENGINE ====================
 
 def create_bot_file(user_id, token, template_key):
@@ -188,11 +225,17 @@ def create_bot_file(user_id, token, template_key):
         with open(template_path, 'r', encoding='utf-8') as f:
             code = f.read()
 
+        # للقوالب التي تستخدم {TOKEN} مباشرة
         code = code.replace('{TOKEN}', token)
         code = code.replace('{OWNER_ID}', str(user_id))
 
         with open(os.path.join(bot_folder, "bot.py"), 'w', encoding='utf-8') as f:
             f.write(code)
+
+        # كتابة ملف .env لأي قالب يحتاج متغيرات البيئة (مثل template 5)
+        with open(os.path.join(bot_folder, ".env"), 'w', encoding='utf-8') as f:
+            f.write(f"TELEGRAM_BOT_TOKEN={token}\n")
+            f.write(f"OWNER_ID={user_id}\n")
 
         reqs_map = {
             '1': "pyTelegramBotAPI\nurllib3\nrequests",
@@ -202,6 +245,8 @@ def create_bot_file(user_id, token, template_key):
             '5': "python-telegram-bot\naiofiles",
             '6': "pyTelegramBotAPI",
             '7': "pyTelegramBotAPI",
+            '8': "pyTelegramBotAPI\nrequests",
+            '9': "pyTelegramBotAPI\nrequests",
         }
         with open(os.path.join(bot_folder, "requirements.txt"), 'w') as f:
             f.write(reqs_map.get(template_key, "pyTelegramBotAPI"))
@@ -230,10 +275,21 @@ def _run_bot(bot_folder):
                 ["pip", "install", "-r", os.path.join(bot_folder, "requirements.txt")],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
+            # تحميل متغيرات البيئة من .env
+            env = os.environ.copy()
+            env_file = os.path.join(bot_folder, ".env")
+            if os.path.exists(env_file):
+                with open(env_file) as ef:
+                    for line in ef:
+                        line = line.strip()
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            env[k.strip()] = v.strip()
             while True:
                 proc = subprocess.Popen(
                     ["python3", os.path.join(bot_folder, "bot.py")],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    env=env
                 )
                 proc.wait()
                 print(f"[صانع] البوت في {bot_folder} توقف. إعادة تشغيل...")
@@ -293,13 +349,18 @@ def admin_main_kb():
         types.InlineKeyboardButton("اجباري المصنوعات :",  callback_data="noop"),
         types.InlineKeyboardButton("يوجد العدد : 1",      callback_data="menu_mandatory"),
     )
-    # Row 10: تحديث المصنع
+    # Row 10: إدارة القوالب
+    kb.add(
+        types.InlineKeyboardButton("📤 رفع قالب جديد",   callback_data="menu_upload_template"),
+        types.InlineKeyboardButton("📋 القوالب المخصصة", callback_data="menu_list_templates"),
+    )
+    # Row 11: تحديث المصنع
     kb.add(
         types.InlineKeyboardButton("🔄 تحديث المصنع",    callback_data="menu_clear_admins"),
     )
     return kb
 
-def user_main_kb():
+def user_main_kb(uid=None):
     kb = types.InlineKeyboardMarkup(row_width=2)
     # Row 1: قائمة بوتاتك | انشاء بوت
     kb.add(
@@ -310,6 +371,11 @@ def user_main_kb():
     kb.add(
         types.InlineKeyboardButton("• معلومات عن البوت •", callback_data="menu_info"),
     )
+    # Row 3: زر لوحة الإدارة للأدمن فقط
+    if uid and is_admin(uid):
+        kb.add(
+            types.InlineKeyboardButton("⚙️ لوحة الإدارة", callback_data="menu_admin_panel"),
+        )
     return kb
 
 def bot_type_kb():
@@ -331,10 +397,9 @@ user_states = {}
 
 def send_main_menu(uid, name, message_id=None):
     text = (
-        f"👋 أهلاً {name}!\n🏭 مرحباً بك في صانع البوتات\n\n"
-        f"{'👑 لوحة الادمن' if is_admin(uid) else ''}\n\n{FACTORY_TAG}"
+        f"👋 أهلاً {name}!\n🏭 مرحباً بك في صانع البوتات\n\n{FACTORY_TAG}"
     )
-    kb = admin_main_kb() if is_admin(uid) else user_main_kb()
+    kb = user_main_kb(uid=uid)
     if message_id:
         try:
             bot.edit_message_text(text, uid, message_id, reply_markup=kb)
@@ -429,11 +494,15 @@ def receive_token(msg):
         return
 
     c = conn.cursor()
-    c.execute("SELECT id FROM bots WHERE token=?", (token,))
-    if c.fetchone():
-        bot.edit_message_text("⚠️ هذا البوت مسجل مسبقاً!", uid, msg_id,
-                              reply_markup=cancel_inline_kb())
+    c.execute("SELECT id, status FROM bots WHERE token=?", (token,))
+    existing = c.fetchone()
+    if existing:
+        # لو موجود ومش محذوف = مسجل فعلاً
         user_states.pop(uid, None)
+        back_kb = types.InlineKeyboardMarkup()
+        back_kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_back"))
+        bot.edit_message_text("⚠️ هذا البوت مسجل مسبقاً!", uid, msg_id,
+                              reply_markup=back_kb)
         return
 
     bot.edit_message_text("⏳ جاري التحقق من التوكن وإنشاء البوت...", uid, msg_id)
@@ -441,16 +510,33 @@ def receive_token(msg):
     template_key = state["template"]
     success, bot_username, bot_name = create_bot_file(uid, token, template_key)
     user_states.pop(uid, None)
-    kb = admin_main_kb() if is_admin(uid) else user_main_kb()
+    kb = user_main_kb(uid=uid)
 
     if success:
-        bot.edit_message_text(
+        success_text = (
             f"✅ **تم إنشاء البوت بنجاح!**\n\n"
             f"🤖 الاسم: `{bot_name}`\n"
             f"👤 اليوزر: @{bot_username}\n"
             f"📌 النوع: {bot_type_names.get(template_key)}\n\n"
-            f"{FACTORY_TAG}",
-            uid, msg_id, parse_mode="Markdown", reply_markup=kb)
+            f"{FACTORY_TAG}"
+        )
+        bot.edit_message_text(success_text, uid, msg_id, parse_mode="Markdown", reply_markup=kb)
+        # إشعار الأدمن الرئيسي إذا لم يكن هو المنشئ
+        if uid != ADMIN_ID:
+            try:
+                c2 = conn.cursor()
+                c2.execute("SELECT first_name, username FROM users WHERE id=?", (uid,))
+                user_row = c2.fetchone()
+                creator_name = (user_row[0] if user_row else str(uid))
+                creator_user = (f"@{user_row[1]}" if user_row and user_row[1] else f"ID:{uid}")
+                bot.send_message(ADMIN_ID,
+                    f"🆕 **تم إنشاء بوت جديد!**\n\n"
+                    f"👤 المنشئ: {creator_name} ({creator_user})\n"
+                    f"🤖 البوت: @{bot_username}\n"
+                    f"📌 النوع: {bot_type_names.get(template_key)}",
+                    parse_mode="Markdown")
+            except:
+                pass
     else:
         bot.edit_message_text(f"❌ حدث خطأ: {bot_name}", uid, msg_id, reply_markup=kb)
 
@@ -476,7 +562,13 @@ def list_bots(call):
     for i, b in enumerate(bots, 1):
         icon = "🟢" if b[7] == "active" else "🔴"
         text += f"{i}. {icon} @{b[3]} | {b[5]} | {b[6]}\n"
-    bot.edit_message_text(text, uid, call.message.message_id, parse_mode="Markdown", reply_markup=back_kb)
+    # تيليغرام يقبل 4096 حرف كحد أقصى
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n...والمزيد"
+    try:
+        bot.edit_message_text(text, uid, call.message.message_id, parse_mode="Markdown", reply_markup=back_kb)
+    except Exception:
+        bot.edit_message_text(text, uid, call.message.message_id, reply_markup=back_kb)
 
 # ==================== معلومات بوت ====================
 
@@ -501,7 +593,7 @@ def bot_info_show(msg):
     c.execute("SELECT * FROM bots WHERE username=? OR token=?", (query, query))
     b = c.fetchone()
     user_states.pop(uid, None)
-    kb = admin_main_kb() if is_admin(uid) else user_main_kb()
+    kb = user_main_kb(uid=uid)
 
     if not b:
         bot.edit_message_text("❌ البوت غير موجود في قاعدة البيانات.", uid, msg_id, reply_markup=kb)
@@ -536,7 +628,17 @@ def delete_bot_confirm(msg):
     username = msg.text.strip().replace("@", "")
     with db_lock:
         c = conn.cursor()
-        c.execute("UPDATE bots SET status='deleted' WHERE username=?", (username,))
+        # احذف الملفات أولاً
+        c.execute("SELECT folder FROM bots WHERE username=?", (username,))
+        row = c.fetchone()
+        if row and row[0] and os.path.exists(row[0]):
+            import shutil
+            try:
+                shutil.rmtree(row[0])
+            except:
+                pass
+        # احذف من قاعدة البيانات نهائياً
+        c.execute("DELETE FROM bots WHERE username=?", (username,))
         conn.commit()
         result = c.rowcount
 
@@ -545,7 +647,7 @@ def delete_bot_confirm(msg):
     if result == 0:
         bot.edit_message_text("❌ البوت غير موجود!", uid, msg_id, reply_markup=kb)
     else:
-        bot.edit_message_text(f"✅ تم حذف البوت @{username}", uid, msg_id, reply_markup=kb)
+        bot.edit_message_text(f"✅ تم حذف البوت @{username} نهائياً من قاعدة البيانات والملفات.", uid, msg_id, reply_markup=kb)
 
 # ==================== ADMIN: تشغيل/ايقاف ====================
 
@@ -624,7 +726,16 @@ def delete_all_confirm(call):
     if call.data == "confirm_delete_all":
         with db_lock:
             c = conn.cursor()
-            c.execute("UPDATE bots SET status='deleted'")
+            c.execute("SELECT folder FROM bots")
+            folders = c.fetchall()
+            import shutil
+            for (folder,) in folders:
+                if folder and os.path.exists(folder):
+                    try:
+                        shutil.rmtree(folder)
+                    except:
+                        pass
+            c.execute("DELETE FROM bots")
             conn.commit()
         bot.edit_message_text("✅ تم حذف جميع البوتات.", call.message.chat.id, call.message.message_id,
                               reply_markup=types.InlineKeyboardMarkup().add(
@@ -678,7 +789,16 @@ def delete_expired(call):
         return
     with db_lock:
         c = conn.cursor()
-        c.execute("UPDATE bots SET status='deleted' WHERE added_to_group=0")
+        c.execute("SELECT folder FROM bots WHERE added_to_group=0")
+        folders = c.fetchall()
+        import shutil
+        for (folder,) in folders:
+            if folder and os.path.exists(folder):
+                try:
+                    shutil.rmtree(folder)
+                except:
+                    pass
+        c.execute("DELETE FROM bots WHERE added_to_group=0")
         conn.commit(); count = c.rowcount
     bot.answer_callback_query(call.id, f"✅ تم حذف {count} بوت منتهي.")
     back_to_main(call)
@@ -916,23 +1036,282 @@ def remove_all_admins_cb(call):
                           reply_markup=types.InlineKeyboardMarkup().add(
                               types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_back")))
 
+
+
+# ==================== ADMIN: نظام رفع القوالب ====================
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu_upload_template")
+def upload_template_start(call):
+    if not is_admin(call.from_user.id): return
+    uid = call.from_user.id
+    user_states[uid] = {"step": "upload_template_waiting_file", "msg_id": call.message.message_id}
+    bot.edit_message_text(
+        "📤 **رفع قالب بوت جديد**\n\n"
+        "أرسل ملف `.py` الخاص بالبوت.\n\n"
+        "⚠️ **تعليمات مهمة:**\n"
+        "• يجب أن يحتوي الكود على `{TOKEN}` بدل التوكن\n"
+        "• يجب أن يحتوي على `{OWNER_ID}` بدل ايدي المطور\n"
+        "• مثال: `bot = telebot.TeleBot(\"{TOKEN}\")`\n\n"
+        "سيتم استبدالهم تلقائياً عند إنشاء كل بوت.",
+        uid, call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=cancel_inline_kb("menu_admin_panel")
+    )
+
+@bot.message_handler(
+    content_types=["document"],
+    func=lambda m: user_states.get(m.from_user.id, {}).get("step") == "upload_template_waiting_file"
+)
+def upload_template_receive_file(msg):
+    import re as _re
+
+    def _extract_token(code):
+        info = []
+        # 1. توكن حقيقي 123:ABC
+        real = _re.search(r'(\d{8,12}:[A-Za-z0-9_-]{20,})', code)
+        if real and '{TOKEN}' not in real.group(0):
+            code = code.replace(real.group(1), '{TOKEN}')
+            info.append("🔑 توكن حقيقي → `{TOKEN}`")
+            return code, info
+        # 2. متغير اسمه tok/token/TOKEN = "قيمة"
+        vm = _re.search(
+            r'(tok\w*|token\w*|TOKEN\w*|BOT_TOKEN\w*|API_TOKEN\w*)\s*=\s*["\']([^"\']+)["\']',
+            code, _re.IGNORECASE
+        )
+        if vm:
+            vname, vval = vm.group(1), vm.group(2)
+            code = _re.sub(
+                r'(' + _re.escape(vname) + r'\s*=\s*)["\'][^"\']+["\']',
+                r'\g<1>"{TOKEN}"', code, count=1
+            )
+            info.append(f"🔑 `{vname}` = `{vval}` → `{{TOKEN}}`")
+            fstr = _re.compile(r'\{' + _re.escape(vname) + r'\}')
+            if fstr.search(code):
+                code = fstr.sub('{TOKEN}', code)
+                info.append(f"🔗 `{{{vname}}}` في f-string → `{{TOKEN}}`")
+            return code, info
+        if '{TOKEN}' in code:
+            info.append("✅ يحتوي على `{TOKEN}` مسبقاً")
+        else:
+            info.append("⚠️ لم يُعثر على توكن - أضف `{TOKEN}` يدوياً")
+        return code, info
+
+    def _extract_owner(code):
+        info = []
+        m = _re.search(
+            r'(OWNER_ID|ADMIN_ID|owner_id|admin_id|my_id|MY_ID)\s*=\s*(\d{5,12})',
+            code
+        )
+        if m:
+            code = _re.sub(
+                _re.escape(m.group(1)) + r'\s*=\s*' + _re.escape(m.group(2)),
+                f'{m.group(1)} = {{OWNER_ID}}', code, count=1
+            )
+            info.append(f"👤 `{m.group(1)}` = `{m.group(2)}` → `{{OWNER_ID}}`")
+        elif '{OWNER_ID}' in code:
+            info.append("✅ يحتوي على `{OWNER_ID}` مسبقاً")
+        else:
+            info.append("⚠️ لم يُعثر على OWNER_ID")
+        return code, info
+
+    uid = msg.from_user.id
+    state = user_states.get(uid, {})
+    msg_id = state.get("msg_id")
+
+    if not is_admin(uid):
+        return
+
+    doc = msg.document
+    if not doc.file_name.endswith(".py"):
+        bot.send_message(uid, "❌ الملف يجب أن يكون `.py` فقط!")
+        return
+
+    try:
+        file_info = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        code = downloaded.decode("utf-8")
+    except Exception as e:
+        bot.send_message(uid, f"❌ فشل تنزيل الملف: {e}")
+        return
+
+    info_lines = []
+
+    # ===== استخراج التوكن تلقائياً =====
+    TOKEN_RE = _re.compile(r'(\d{8,12}:[A-Za-z0-9_-]{20,})')
+    # لا نلتقط {TOKEN} إذا كان مستبدلاً مسبقاً
+    token_match = TOKEN_RE.search(code)
+    found_token = None
+    if token_match and '{TOKEN}' not in token_match.group(0):
+        found_token = token_match.group(1)
+        code = code.replace(found_token, '{TOKEN}')
+        info_lines.append(f"🔑 تم استخراج التوكن واستبداله بـ `{{TOKEN}}`")
+    elif '{TOKEN}' in code:
+        info_lines.append("✅ الملف يحتوي على `{TOKEN}` مسبقاً")
+    else:
+        info_lines.append("⚠️ لم يتم العثور على توكن في الملف!")
+
+    # ===== استبدال OWNER_ID =====
+    # نبحث عن أي ID رقمي طويل (7+ أرقام) قد يكون owner id
+    OWNER_RE = _re.compile(r'(?:OWNER_ID|ADMIN_ID|owner_id|admin_id)\s*=\s*(\d{7,12})')
+    owner_match = OWNER_RE.search(code)
+    if owner_match:
+        found_owner = owner_match.group(1)
+        code = code.replace(found_owner, '{OWNER_ID}', 1)
+        info_lines.append(f"👤 تم استخراج OWNER_ID واستبداله بـ `{{OWNER_ID}}`")
+    elif '{OWNER_ID}' in code:
+        info_lines.append("✅ الملف يحتوي على `{OWNER_ID}` مسبقاً")
+    else:
+        info_lines.append("⚠️ لم يتم العثور على OWNER_ID - لن يُستبدل")
+
+    user_states[uid] = {
+        "step": "upload_template_waiting_name",
+        "msg_id": msg_id,
+        "code": code,
+        "filename": doc.file_name,
+    }
+
+    summary = "\n".join(info_lines)
+    bot.send_message(
+        uid,
+        f"✅ تم تحليل الملف: `{doc.file_name}`\n\n"
+        f"{summary}\n\n"
+        f"📝 أرسل **اسم القالب** الذي سيظهر في القائمة\n"
+        f"مثال: `🎮 بوت الألعاب`",
+        parse_mode="Markdown",
+        reply_markup=cancel_inline_kb("menu_admin_panel")
+    )
+
+@bot.message_handler(
+    func=lambda m: user_states.get(m.from_user.id, {}).get("step") == "upload_template_waiting_name"
+)
+def upload_template_receive_name(msg):
+    uid = msg.from_user.id
+    state = user_states.get(uid, {})
+    msg_id = state.get("msg_id")
+
+    if not is_admin(uid):
+        return
+
+    template_name = msg.text.strip()
+    if len(template_name) < 2 or len(template_name) > 50:
+        bot.send_message(uid, "❌ الاسم يجب أن يكون بين 2 و 50 حرف!")
+        return
+
+    code     = state["code"]
+    filename = state["filename"]
+
+    # الحصول على مفتاح جديد
+    key = get_next_template_key()
+
+    # حفظ الملف في مجلد القوالب
+    save_path = f"bots_templates/custom_{key}_{filename}"
+    try:
+        with open(save_path, "w", encoding="utf-8") as f:
+            f.write(code)
+    except Exception as e:
+        bot.send_message(uid, f"❌ فشل حفظ الملف: {e}")
+        user_states.pop(uid, None)
+        return
+
+    # حفظ في قاعدة البيانات
+    with db_lock:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO custom_templates (key, name, filename, requirements, added_by, added_at) VALUES (?,?,?,?,?,?)",
+            (key, template_name, f"custom_{key}_{filename}", "pyTelegramBotAPI\nrequests",
+             uid, datetime.now().strftime("%Y-%m-%d %H:%M"))
+        )
+        conn.commit()
+
+    # تحديث القوالب في الذاكرة
+    bot_templates[key] = save_path
+    bot_type_names[key] = template_name
+
+    user_states.pop(uid, None)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🔙 لوحة الإدارة", callback_data="menu_admin_panel"))
+
+    bot.send_message(
+        uid,
+        f"✅ **تم إضافة القالب بنجاح!**\n\n"
+        f"🔑 المفتاح: `{key}`\n"
+        f"📌 الاسم: {template_name}\n"
+        f"📁 الملف: `custom_{key}_{filename}`\n\n"
+        f"الحين يظهر في قائمة إنشاء البوت للجميع!",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu_list_templates")
+def list_custom_templates(call):
+    if not is_admin(call.from_user.id): return
+    uid = call.from_user.id
+
+    templates = get_custom_templates()
+    back_kb = types.InlineKeyboardMarkup()
+
+    if templates:
+        for t in templates:
+            back_kb.add(types.InlineKeyboardButton(
+                f"🗑 حذف: {t[2]}", callback_data=f"del_template_{t[1]}"
+            ))
+
+    back_kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_admin_panel"))
+
+    if not templates:
+        text = "📋 لا يوجد قوالب مخصصة مضافة بعد."
+    else:
+        text = f"📋 **القوالب المخصصة ({len(templates)}):**\n\n"
+        for t in templates:
+            text += f"🔑 `{t[1]}` | {t[2]}\n📁 {t[3]}\n📅 {t[6]}\n\n"
+
+    bot.edit_message_text(text, uid, call.message.message_id,
+                          parse_mode="Markdown", reply_markup=back_kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("del_template_"))
+def delete_custom_template(call):
+    if not is_admin(call.from_user.id): return
+    uid = call.from_user.id
+    key = call.data.replace("del_template_", "")
+
+    with db_lock:
+        c = conn.cursor()
+        c.execute("SELECT filename FROM custom_templates WHERE key=?", (key,))
+        row = c.fetchone()
+        if row:
+            filepath = f"bots_templates/{row[0]}"
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            c.execute("DELETE FROM custom_templates WHERE key=?", (key,))
+            conn.commit()
+
+    # إزالة من الذاكرة
+    bot_templates.pop(key, None)
+    bot_type_names.pop(key, None)
+
+    bot.answer_callback_query(call.id, "✅ تم حذف القالب.")
+    list_custom_templates(call)
+
+# ==================== ADMIN: لوحة الإدارة ====================
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu_admin_panel")
+def admin_panel(call):
+    if not is_admin(call.from_user.id): return
+    uid = call.from_user.id
+    name = call.from_user.first_name
+    text = (
+        f"👑 لوحة الإدارة\n🏭 صانع البوتات\n\n{FACTORY_TAG}"
+    )
+    kb = admin_main_kb()
+    kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="menu_back"))
+    bot.edit_message_text(text, uid, call.message.message_id, reply_markup=kb)
+
 # ==================== MAIN ====================
 
 if __name__ == "__main__":
     os.makedirs('created_bots', exist_ok=True)
     os.makedirs('bots_templates', exist_ok=True)
-    print(f"Bot Factory Started... | {FACTORY_TAG}")
-
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    class PingHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        def log_message(self, *args):
-            pass
-    server = HTTPServer(("0.0.0.0", 8080), PingHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print("HTTP server running on port 8080")
-
+    load_dynamic_templates()   # تحميل القوالب المخصصة من DB
+    print(f"🏭 Bot Factory Started... | {FACTORY_TAG}")
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
